@@ -1,30 +1,42 @@
-import asyncio, time
+import os
+import time
+import asyncio
+from flask import Flask, request
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 from telethon.sync import TelegramClient
 from telethon.tl.functions.contacts import ImportContactsRequest, DeleteContactsRequest
 from telethon.tl.types import InputPhoneContact
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
-import os
 
-# ✅ API info from env variables
+# 📦 Env variables
 api_id = int(os.getenv("API_ID"))
 api_hash = os.getenv("API_HASH")
-phone_number = os.getenv("PHONE_NUMBER")
 bot_token = os.getenv("BOT_TOKEN")
+phone_number = os.getenv("PHONE_NUMBER")
+webhook_url = os.getenv("WEBHOOK_URL")  # eg: https://yourdomain.com/webhook
 
-# ✅ Per-user rate limit info
-user_limits = {}  # {user_id: {'last_reset': timestamp, 'count': int}}
+app = Flask(__name__)
 
-RATE_LIMIT = 50  # প্রতি মিনিটে সর্বোচ্চ নাম্বার
+# 🌐 Webhook route
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    update = Update.de_json(request.get_json(force=True), application.bot)
+    application.update_queue.put_nowait(update)
+    return "OK"
+
+# 🛡️ Rate limiting
+RATE_LIMIT = 50
+user_limits = {}
 
 def parse_numbers(text):
     lines = text.strip().split('\n')
     numbers = []
     for line in lines:
         line = line.strip().replace(" ", "")
-        if line and not line.startswith('+'):
-            line = '+' + line
-        numbers.append(line)
+        if line:
+            if not line.startswith('+'):
+                line = '+' + line
+            numbers.append(line)
     return numbers
 
 async def check_number(client, number):
@@ -47,22 +59,20 @@ async def handle_numbers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     now = time.time()
 
-    # ⏱️ Rate limiting
     user_data = user_limits.get(user_id, {"last_reset": now, "count": 0})
     if now - user_data["last_reset"] > 60:
-        user_data = {"last_reset": now, "count": 0}  # রিসেট করো
+        user_data = {"last_reset": now, "count": 0}
 
     numbers = parse_numbers(update.message.text)
     if user_data["count"] + len(numbers) > RATE_LIMIT:
-        await update.message.reply_text(f"⚠️ আপনি এক মিনিটে সর্বোচ্চ {RATE_LIMIT}টি নাম্বার চেক করতে পারবেন। দয়া করে একটু পর আবার চেষ্টা করুন।")
+        await update.message.reply_text(f"⚠️ প্রতি মিনিটে সর্বোচ্চ {RATE_LIMIT}টি নাম্বার চেক করা যাবে। একটু পর আবার চেষ্টা করুন।")
         return
 
-    # ✅ Proceed
     user_data["count"] += len(numbers)
     user_limits[user_id] = user_data
 
     found = []
-    async with TelegramClient('checker_session', api_id, api_hash) as client:
+    async with TelegramClient("checker_session", api_id, api_hash) as client:
         await client.start(phone=phone_number)
         for number in numbers:
             exists = await check_number(client, number)
@@ -76,13 +86,16 @@ async def handle_numbers(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(reply)
 
-# 🔃 বট চালু
-def main():
-    app = ApplicationBuilder().token(bot_token).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_numbers))
-    print("🤖 Bot চলছে...")
-    app.run_polling()
+# 🧠 অ্যাপ্লিকেশন সেটআপ
+application = Application.builder().token(bot_token).concurrent_updates(True).build()
+application.add_handler(CommandHandler("start", start))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_numbers))
+
+# 🔃 বটের Webhook শুরু
+async def setup_webhook():
+    await application.bot.set_webhook(f"{webhook_url}/webhook")
 
 if __name__ == "__main__":
-    main()
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(setup_webhook())
+    app.run(host="0.0.0.0", port=10000)  # Render: port 10000
